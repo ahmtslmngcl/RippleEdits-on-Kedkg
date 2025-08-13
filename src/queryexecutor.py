@@ -16,6 +16,9 @@ class QueryExecutor:
             self._model = model
         self._tokenizer = tokenizer
         self._prompt_context = ''
+        # template support for kedkg prompts
+        self._prompt_template = None
+        self._prompt_placeholder = '<<<<QUESTION>>>>'
 
     def get_model(self):
         return self._model
@@ -32,6 +35,15 @@ class QueryExecutor:
     def set_prompt_context(self, context):
         self._prompt_context = context
 
+    def set_prompt_template(self, template: str, placeholder: str = '<<<<QUESTION>>>>'):
+        self._prompt_template = template
+        self._prompt_placeholder = placeholder
+
+    def set_prompt_template_from_file(self, path: str, placeholder: str = '<<<<QUESTION>>>>'):
+        with open(path, 'r', encoding='utf-8') as f:
+            self._prompt_template = f.read()
+        self._prompt_placeholder = placeholder
+
     @staticmethod
     def _verify_answer(model_answer, correct_answer):
         for answer in correct_answer:
@@ -40,9 +52,11 @@ class QueryExecutor:
         return True
 
     def execute_query(self, query, answer_length=30):
-        prompt = self._prompt_context + query.get_query_prompt()
-        model_answer = self._generate_text(prompt, len(prompt) + answer_length)
-        model_answer = model_answer.replace(self._prompt_context, '', 1)
+        question = query.get_query_prompt()
+        core = self._prompt_template.replace(self._prompt_placeholder, question) if self._prompt_template else question
+        prompt = self._prompt_context + core
+        raw = self._generate_text(prompt, answer_length)
+        model_answer = raw[len(prompt):].lstrip() if raw.startswith(prompt) else raw.replace(self._prompt_context, '', 1).lstrip()
         print(f'query: {query.to_dict()}\nmodel answer: {model_answer}')
         return self._verify_answer(model_answer, query.get_answers())
 
@@ -63,7 +77,13 @@ class HFQueryExecutor(QueryExecutor):
 
     def _generate_text(self, prompt, length):
         inputs = self._tokenizer.encode(prompt, return_tensors='pt').to(self._device)
-        outputs = self._model.generate(inputs, temperature=0, max_length=length)
+        outputs = self._model.generate(
+            inputs,
+            do_sample=False,
+            temperature=0,
+            max_new_tokens=length,
+            pad_token_id=getattr(self._tokenizer, "eos_token_id", None),
+        )
         return self._tokenizer.decode(outputs[0], skip_special_tokens=True)
 
 
@@ -136,6 +156,25 @@ class GPT3QueryExecutor(QueryExecutor):
     def get_model_name(self):
         return self._model_size
 
+    def _generate_text(self, prompt, length):
+        text, log_probs = call_openai(
+            prompt=prompt,
+            model=self._model_size,
+            temperature=0,
+            max_tokens=length,
+        )
+        text = f'{prompt} {process_generation(text)}'
+        return text
+    
+class Gemma3_4BExecutor(QueryExecutor):
+
+    def __init__(self, model_size='gemma3:4b'):
+        self._model_size = model_size
+        super().__init__(send_to_device=False)
+    
+    def get_model_name(self):
+        return self._model_size
+    
     def _generate_text(self, prompt, length):
         text, log_probs = call_openai(
             prompt=prompt,
